@@ -100,6 +100,7 @@ pub struct HostConfig {
     pub cfg_size: usize,
     pub bus_base: u8,
     pub logical_bus_end: u8,
+    pub iatu_mode: IatuMode,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -155,12 +156,6 @@ impl Rk3588PcieHost {
         cfg: MmioRaw,
         config: HostConfig,
     ) -> Result<Self, Error> {
-        let iatu_mode = if read32(&dbi, PCIE_ATU_VIEWPORT) == u32::MAX {
-            IatuMode::Unroll
-        } else {
-            IatuMode::Viewport
-        };
-
         Ok(Self {
             apb,
             dbi,
@@ -171,7 +166,7 @@ impl Rk3588PcieHost {
             bus_base: config.bus_base,
             logical_bus_end: config.logical_bus_end,
             cfg_bus_delta: i16::from(config.bus_base),
-            iatu_mode,
+            iatu_mode: config.iatu_mode,
         })
     }
 
@@ -180,10 +175,40 @@ impl Rk3588PcieHost {
         delay: &dyn Delay,
         mut reset: Option<&mut dyn ResetControl>,
     ) -> LinkReport {
-        self.enable_dbi_ro_writes();
+        info!(
+            "Rockchip RK3588 PCIe host {:#x}: force root-complex mode begin",
+            self.apb_phys
+        );
         self.force_root_complex_mode();
-        self.program_root_bridge_defaults();
+        info!(
+            "Rockchip RK3588 PCIe host {:#x}: force root-complex mode completed",
+            self.apb_phys
+        );
 
+        info!(
+            "Rockchip RK3588 PCIe host {:#x}: enable DBI writes begin",
+            self.apb_phys
+        );
+        self.enable_dbi_ro_writes();
+        info!(
+            "Rockchip RK3588 PCIe host {:#x}: enable DBI writes completed",
+            self.apb_phys
+        );
+
+        info!(
+            "Rockchip RK3588 PCIe host {:#x}: program root bridge defaults begin",
+            self.apb_phys
+        );
+        self.program_root_bridge_defaults();
+        info!(
+            "Rockchip RK3588 PCIe host {:#x}: program root bridge defaults completed",
+            self.apb_phys
+        );
+
+        info!(
+            "Rockchip RK3588 PCIe host {:#x}: firmware link check begin",
+            self.apb_phys
+        );
         let firmware_trained = self.link_up();
         if firmware_trained {
             let report = self.link_report(true);
@@ -202,6 +227,10 @@ impl Rk3588PcieHost {
             reset.assert_perst();
         }
 
+        info!(
+            "Rockchip RK3588 PCIe host {:#x}: start LTSSM sequence",
+            self.apb_phys
+        );
         write32(&self.apb, PCIE_CLIENT_GENERAL_CTRL, 0x000c_0008);
         write32(&self.apb, PCIE_CLIENT_GENERAL_DEBUG, 0);
         write32(
@@ -221,9 +250,17 @@ impl Rk3588PcieHost {
             reset.deassert_perst();
             delay.delay_ms(1);
         }
+        info!(
+            "Rockchip RK3588 PCIe host {:#x}: request link speed change begin",
+            self.apb_phys
+        );
         update32(&self.dbi, PCIE_LINK_WIDTH_SPEED_CONTROL, |value| {
             value | PORT_LOGIC_SPEED_CHANGE
         });
+        info!(
+            "Rockchip RK3588 PCIe host {:#x}: request link speed change completed",
+            self.apb_phys
+        );
 
         if self.wait_link_up(delay) {
             delay.delay_ms(PCIE_LINK_STABLE_WAIT_MS);
@@ -322,9 +359,7 @@ impl Rk3588PcieHost {
     }
 
     fn enable_dbi_ro_writes(&self) {
-        update32(&self.dbi, PCIE_MISC_CONTROL_1_OFF, |value| {
-            value | PCIE_DBI_RO_WR_EN
-        });
+        write32(&self.dbi, PCIE_MISC_CONTROL_1_OFF, PCIE_DBI_RO_WR_EN);
     }
 
     fn force_root_complex_mode(&self) {

@@ -69,32 +69,51 @@ fn probe_gpt<T: BlockDriverOps + ?Sized>(inner: &mut T) -> DevResult<GptProbeRes
     let mbr_ok = validate_protective_mbr(inner, &mut block_buf);
     let mut disk = Disk::new(BlockDriverAdapter(inner)).map_err(map_disk_error)?;
 
+    let mut primary_error = None;
     let primary = match try_read_valid_header(&mut disk, Lba(1), &mut block_buf, num_blocks) {
         Ok(header) => header,
         Err(HeaderProbeError::Absent) => None,
-        Err(HeaderProbeError::Invalid(err)) => return Err(err),
+        Err(HeaderProbeError::Invalid(err)) => {
+            warn!("primary GPT header is invalid: {err:?}");
+            primary_error = Some(err);
+            None
+        }
     };
     let secondary_lba = num_blocks.checked_sub(1).ok_or(DevError::BadState)?;
+    let mut secondary_error = None;
     let secondary =
         match try_read_valid_header(&mut disk, Lba(secondary_lba), &mut block_buf, num_blocks) {
             Ok(header) => header,
             Err(HeaderProbeError::Absent) => None,
-            Err(HeaderProbeError::Invalid(err)) => return Err(err),
+            Err(HeaderProbeError::Invalid(err)) => {
+                warn!("secondary GPT header is invalid: {err:?}");
+                secondary_error = Some(err);
+                None
+            }
         };
 
-    let header = match (primary, secondary) {
-        (None, None) => return Ok(GptProbeResult::Absent),
+    let headers = match (primary, secondary) {
+        (None, None) => {
+            if let Some(err) = primary_error.or(secondary_error) {
+                return Err(err);
+            }
+            return Ok(GptProbeResult::Absent);
+        }
         (Some(primary), Some(secondary)) => {
-            validate_header_pair(&primary, &secondary, num_blocks)?;
-            primary
+            if validate_header_pair(&primary, &secondary, num_blocks).is_err() {
+                warn!("primary and secondary GPT headers do not match; trying primary GPT first");
+                (Some(primary), None)
+            } else {
+                (Some(primary), Some(secondary))
+            }
         }
         (Some(primary), None) => {
             warn!("secondary GPT header is unavailable or invalid; using primary header only");
-            primary
+            (Some(primary), None)
         }
         (None, Some(secondary)) => {
             warn!("primary GPT header is unavailable or invalid; using secondary header only");
-            secondary
+            (None, Some(secondary))
         }
     };
 
@@ -102,7 +121,7 @@ fn probe_gpt<T: BlockDriverOps + ?Sized>(inner: &mut T) -> DevResult<GptProbeRes
         warn!("protective MBR validation failed: {err}");
     }
 
-    let table = load_partition_table(&mut disk, &header, block_size)?;
+    let table = load_partition_table_with_fallback(&mut disk, headers.0, headers.1, block_size)?;
     Ok(GptProbeResult::Valid(table))
 }
 
@@ -173,6 +192,10 @@ fn validate_header(
     block_size: usize,
 ) -> DevResult {
     if header.revision != GptHeaderRevision::VERSION_1_0 {
+        warn!(
+            "GPT header at LBA {expected_lba} has unsupported revision {:?}",
+            header.revision
+        );
         return Err(DevError::InvalidParam);
     }
 
@@ -180,24 +203,46 @@ fn validate_header(
     if header_size < u32::try_from(core::mem::size_of::<GptHeader>()).unwrap()
         || usize::try_from(header_size).map_err(|_| DevError::BadState)? > block_size
     {
+        warn!(
+            "GPT header at LBA {expected_lba} has invalid header size {header_size}, \
+             block_size={block_size}"
+        );
         return Err(DevError::InvalidParam);
     }
 
     if header.reserved.to_u32() != 0 {
+        warn!(
+            "GPT header at LBA {expected_lba} has non-zero reserved field {:#x}",
+            header.reserved.to_u32()
+        );
         return Err(DevError::InvalidParam);
     }
 
     if header.my_lba.to_u64() != expected_lba {
+        warn!(
+            "GPT header at LBA {expected_lba} reports my_lba={}",
+            header.my_lba.to_u64()
+        );
         return Err(DevError::InvalidParam);
     }
 
     let last_block = num_blocks.checked_sub(1).ok_or(DevError::BadState)?;
     let alternate_lba = header.alternate_lba.to_u64();
     if alternate_lba > last_block || alternate_lba == expected_lba {
+        warn!(
+            "GPT header at LBA {expected_lba} has invalid alternate_lba={alternate_lba}, \
+             last_block={last_block}"
+        );
         return Err(DevError::InvalidParam);
     }
 
-    if header.calculate_header_crc32() != header.header_crc32 {
+    let calculated_crc = header.calculate_header_crc32();
+    if calculated_crc != header.header_crc32 {
+        warn!(
+            "GPT header at LBA {expected_lba} CRC mismatch: calculated={calculated_crc:#x}, \
+             expected={:#x}",
+            header.header_crc32
+        );
         return Err(DevError::InvalidParam);
     }
 
@@ -217,12 +262,20 @@ fn validate_header(
         .checked_add(entry_array_blocks)
         .ok_or(DevError::BadState)?;
     if entry_array_end > num_blocks {
+        warn!(
+            "GPT header at LBA {expected_lba} has partition entry array outside disk: \
+             start={entry_array_start}, blocks={entry_array_blocks}, num_blocks={num_blocks}"
+        );
         return Err(DevError::InvalidParam);
     }
 
     let first_usable = header.first_usable_lba.to_u64();
     let last_usable = header.last_usable_lba.to_u64();
     if first_usable > last_usable || last_usable > last_block {
+        warn!(
+            "GPT header at LBA {expected_lba} has invalid usable range \
+             {first_usable}..={last_usable}, last_block={last_block}"
+        );
         return Err(DevError::InvalidParam);
     }
 
@@ -233,21 +286,39 @@ fn validate_header_pair(primary: &GptHeader, secondary: &GptHeader, num_blocks: 
     let last_block = num_blocks.checked_sub(1).ok_or(DevError::BadState)?;
     let primary_disk_guid = primary.disk_guid;
     let secondary_disk_guid = secondary.disk_guid;
-    if primary.my_lba.to_u64() != 1
+
+    let lba_pair_mismatch = primary.my_lba.to_u64() != 1
         || primary.alternate_lba.to_u64() != last_block
         || secondary.my_lba.to_u64() != last_block
-        || secondary.alternate_lba.to_u64() != 1
-    {
-        return Err(DevError::InvalidParam);
-    }
-
-    if primary.first_usable_lba != secondary.first_usable_lba
+        || secondary.alternate_lba.to_u64() != 1;
+    let metadata_mismatch = primary.first_usable_lba != secondary.first_usable_lba
         || primary.last_usable_lba != secondary.last_usable_lba
         || primary_disk_guid != secondary_disk_guid
         || primary.number_of_partition_entries != secondary.number_of_partition_entries
         || primary.size_of_partition_entry != secondary.size_of_partition_entry
-        || primary.partition_entry_array_crc32 != secondary.partition_entry_array_crc32
-    {
+        || primary.partition_entry_array_crc32 != secondary.partition_entry_array_crc32;
+
+    if lba_pair_mismatch || metadata_mismatch {
+        warn!(
+            "GPT header pair mismatch: primary(my={}, alt={}, usable={}..={}, entries={}, \
+             entry_size={}, entry_crc={:#x}) secondary(my={}, alt={}, usable={}..={}, entries={}, \
+             entry_size={}, entry_crc={:#x}) last_block={}",
+            primary.my_lba.to_u64(),
+            primary.alternate_lba.to_u64(),
+            primary.first_usable_lba.to_u64(),
+            primary.last_usable_lba.to_u64(),
+            primary.number_of_partition_entries.to_u32(),
+            primary.size_of_partition_entry.to_u32(),
+            primary.partition_entry_array_crc32,
+            secondary.my_lba.to_u64(),
+            secondary.alternate_lba.to_u64(),
+            secondary.first_usable_lba.to_u64(),
+            secondary.last_usable_lba.to_u64(),
+            secondary.number_of_partition_entries.to_u32(),
+            secondary.size_of_partition_entry.to_u32(),
+            secondary.partition_entry_array_crc32,
+            last_block
+        );
         return Err(DevError::InvalidParam);
     }
 
@@ -318,11 +389,48 @@ where
     })
 }
 
+fn load_partition_table_with_fallback<I>(
+    disk: &mut Disk<I>,
+    primary: Option<GptHeader>,
+    secondary: Option<GptHeader>,
+    block_size: BlockSize,
+) -> DevResult<PartitionTable>
+where
+    I: BlockIo<Error = DevError>,
+{
+    match (primary, secondary) {
+        (Some(primary), Some(secondary)) => {
+            match load_partition_table(disk, &primary, block_size) {
+                Ok(table) => Ok(table),
+                Err(err) => {
+                    warn!(
+                        "primary GPT partition entry array is invalid: {err:?}; trying secondary \
+                         GPT"
+                    );
+                    load_partition_table(disk, &secondary, block_size)
+                }
+            }
+        }
+        (Some(primary), None) => load_partition_table(disk, &primary, block_size),
+        (None, Some(secondary)) => load_partition_table(disk, &secondary, block_size),
+        (None, None) => Err(DevError::BadState),
+    }
+}
+
 fn validate_partition_array(
     header: &GptHeader,
     entry_array: &GptPartitionEntryArray<'_>,
 ) -> DevResult {
-    if entry_array.calculate_crc32() != header.partition_entry_array_crc32 {
+    let calculated_crc = entry_array.calculate_crc32();
+    if calculated_crc != header.partition_entry_array_crc32 {
+        let layout = entry_array.layout();
+        warn!(
+            "GPT partition entry array CRC mismatch: start_lba={} entries={} \
+             calculated={calculated_crc:#x}, expected={:#x}",
+            layout.start_lba.to_u64(),
+            layout.num_entries,
+            header.partition_entry_array_crc32
+        );
         return Err(DevError::InvalidParam);
     }
 

@@ -446,19 +446,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "arm-scmi"
+version = "0.1.0"
+dependencies = [
+ "aarch64-cpu-ext",
+ "bare-test 0.7.0",
+ "bare-test-macros 0.2.0",
+ "bitflags 2.11.1",
+ "log",
+ "mbarrier",
+ "nb",
+ "num-align",
+ "smccc",
+ "spin 0.10.0",
+ "thiserror 2.0.18",
+ "tock-registers 0.10.1",
+]
+
+[[package]]
 name = "arm-targets"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "570304ff56d67c17f521f68d55a63dffbb067d63f675e2b4603283e2d50b9d59"
-
-[[package]]
-name = "arm_pl011"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "efcf6afca4502993a737ba1e00952d1321078689da92bf7aab27d4e5756c0bec"
-dependencies = [
- "tock-registers 0.8.1",
-]
 
 [[package]]
 name = "arm_vcpu"
@@ -1746,6 +1755,7 @@ name = "axplat-dyn"
 version = "0.5.12"
 dependencies = [
  "anyhow",
+ "arm-scmi",
  "ax-alloc",
  "ax-arm-pl031",
  "ax-config-macros",
@@ -1762,6 +1772,7 @@ dependencies = [
  "axklib",
  "crab-usb",
  "dma-api 0.7.2",
+ "dwmmc-host",
  "eth-intel",
  "fdt-edit",
  "heapless 0.9.3",
@@ -1780,8 +1791,8 @@ dependencies = [
  "rockchip-npu",
  "rockchip-pm",
  "rockchip-soc",
- "sdmmc",
- "simple-sdmmc",
+ "sdhci-host",
+ "sdmmc-protocol",
  "some-serial 0.3.1",
  "somehal 0.6.6",
  "spin 0.10.0",
@@ -3496,15 +3507,6 @@ checksum = "624f4a84cc1031cfceb56780b82570a785f6cfdcee4f34c06c4e8f1fba25c970"
 
 [[package]]
 name = "dma-api"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d51274fe946b4c27cdada87cc6de09a50c0d9192c0f30ba455b29dae09caa0b"
-dependencies = [
- "aarch64-cpu-ext",
-]
-
-[[package]]
-name = "dma-api"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3816a852c6c71653e1941cfe22f215eca41c14fd45ec9b32c0fa82fe57fe0989"
@@ -3588,6 +3590,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f93d496c8faa9dc676ebfa225432e1e3b57645c9268ead889286546f6d39356d"
 dependencies = [
  "tock-registers 0.8.1",
+]
+
+[[package]]
+name = "dwmmc-host"
+version = "0.1.0"
+dependencies = [
+ "bitfield-struct",
+ "dma-api 0.7.2",
+ "embedded-hal",
+ "log",
+ "sdmmc-protocol",
+ "volatile 0.6.1",
 ]
 
 [[package]]
@@ -7767,23 +7781,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
-name = "sdmmc"
+name = "sdhci-host"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd0dbda75ab3bc25f210eb7ad16f2bd1f877a05444e1aeea083c60221bf76f15"
 dependencies = [
- "aarch64-cpu 10.0.0",
- "arm_pl011",
- "bare-test-macros 0.2.0",
- "bitflags 2.11.1",
- "cfg-if",
- "dma-api 0.3.1",
- "fdt-parser",
- "kspin",
+ "dma-api 0.7.2",
+ "embedded-hal",
  "log",
- "paste",
- "smccc",
- "spin 0.10.0",
+ "sdmmc-protocol",
+]
+
+[[package]]
+name = "sdmmc-protocol"
+version = "0.1.0"
+dependencies = [
+ "bitflags 2.11.1",
+ "embedded-hal",
+ "log",
 ]
 
 [[package]]
@@ -8099,6 +8112,8 @@ dependencies = [
 [[package]]
 name = "simple-sdmmc"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65f2f7127074b52811ae3b4757e33865a60a8b46e1402c028c301139e0b00d92"
 dependencies = [
  "bitfield-struct",
  "log",
